@@ -44,10 +44,13 @@ conf = {
 	'authors_top': 5,
 	'commit_begin': '',
 	'commit_end': 'HEAD',
-	'linear_linestats': 1,
+	'linear_linestats': 0,
 	'project_name': '',
 	'processes': 8,
-	'start_date': ''
+	'start_date': '',
+	'exclude_extensions': ('png','gif','pdf','json','csv','jpg','sh','txt','lock','svg','md','woff2','hbm','gif'),
+	'include_extensions': tuple(),
+	'exclude_directories': tuple(),  # full or partial paths
 }
 
 def getpipeoutput(cmds, quiet = False):
@@ -536,16 +539,44 @@ class GitDataCollector(DataCollector):
 		extra = ''
 		if conf['linear_linestats']:
 			extra = '--first-parent -m'
-		lines = getpipeoutput(['git log --shortstat %s --pretty=format:"%%at %%aN" %s' % (extra, getlogrange('HEAD'))]).split('\n')
+		lines = getpipeoutput(['git log --numstat %s --pretty=format:"%%at %%aN" %s' % (extra, getlogrange('HEAD'))]).split('\n')
 		lines.reverse()
-		files = 0; inserted = 0; deleted = 0; total_lines = 0
+		files = 0; inserted = 0; deleted = 0; total_lines = 0; each_commit_inserted = 0; each_commit_deleted = 0;
 		author = None
+		file_pattern = re.compile(r'^(\d+)\s+(\d+)\s+(.*)\s*$')
 		for line in lines:
-			if len(line) == 0:
+			# empty lines
+			if len(line.strip()) == 0:
 				continue
 
-			# <stamp> <author>
-			if re.search('files? changed', line) == None:
+            # binary file
+			if line.startswith('-'):
+				continue
+
+			matches = file_pattern.search(line)
+			if matches:
+				inserted, deleted, filename = matches.groups()
+				inserted = int(inserted)
+				deleted = int(deleted)
+				try:
+					ext = filename.split(os.extsep)[-1]
+				except IndexError as ex:
+					ext = ''
+				# ignore files we don't care about
+				if len(conf['include_extensions']) == 0:
+					if ext.startswith(conf['exclude_extensions']):
+						continue
+				else:
+					if not ext.startswith(conf['include_extensions']):
+						continue
+				
+				each_commit_inserted += inserted
+				each_commit_deleted += deleted;
+				total_lines += inserted
+				total_lines -= deleted
+				self.total_lines_added += inserted
+				self.total_lines_removed += deleted
+			else:
 				pos = line.find(' ')
 				if pos != -1:
 					try:
@@ -554,31 +585,34 @@ class GitDataCollector(DataCollector):
 
 						date = datetime.datetime.fromtimestamp(stamp)
 						yymm = date.strftime('%Y-%m')
-						self.lines_added_by_month[yymm] = self.lines_added_by_month.get(yymm, 0) + inserted
-						self.lines_removed_by_month[yymm] = self.lines_removed_by_month.get(yymm, 0) + deleted
+						self.lines_added_by_month[yymm] = self.lines_added_by_month.get(yymm, 0) + each_commit_inserted
+						self.lines_removed_by_month[yymm] = self.lines_removed_by_month.get(yymm, 0) + each_commit_deleted
 
 						yy = date.year
-						self.lines_added_by_year[yy] = self.lines_added_by_year.get(yy,0) + inserted
-						self.lines_removed_by_year[yy] = self.lines_removed_by_year.get(yy, 0) + deleted
+						self.lines_added_by_year[yy] = self.lines_added_by_year.get(yy,0) + each_commit_inserted
+						self.lines_removed_by_year[yy] = self.lines_removed_by_year.get(yy, 0) + each_commit_deleted
 
-						files, inserted, deleted = 0, 0, 0
+						files, inserted, deleted, each_commit_inserted, each_commit_deleted = 0, 0, 0, 0, 0
 					except ValueError:
 						print 'Warning: unexpected line "%s"' % line
 				else:
 					print 'Warning: unexpected line "%s"' % line
-			else:
-				numbers = getstatsummarycounts(line)
+            	
+			# <stamp> <author>
+			# if re.search('files? changed', line) == None:
+			# else:
+			# 	numbers = getstatsummarycounts(line)
 
-				if len(numbers) == 3:
-					(files, inserted, deleted) = map(lambda el : int(el), numbers)
-					total_lines += inserted
-					total_lines -= deleted
-					self.total_lines_added += inserted
-					self.total_lines_removed += deleted
+			# 	if len(numbers) == 3:
+			# 		(files, inserted, deleted) = map(lambda el : int(el), numbers)
+			# 		total_lines += inserted
+			# 		total_lines -= deleted
+			# 		self.total_lines_added += inserted
+			# 		self.total_lines_removed += deleted
 
-				else:
-					print 'Warning: failed to handle line "%s"' % line
-					(files, inserted, deleted) = (0, 0, 0)
+			# 	else:
+			# 		print 'Warning: failed to handle line "%s"' % line
+			# 		(files, inserted, deleted) = (0, 0, 0)
 				#self.changes_by_date[stamp] = { 'files': files, 'ins': inserted, 'del': deleted }
 		self.total_lines += total_lines
 
@@ -590,17 +624,38 @@ class GitDataCollector(DataCollector):
 		# Similar to the above, but never use --first-parent
 		# (we need to walk through every commit to know who
 		# committed what, not just through mainline)
-		lines = getpipeoutput(['git log --shortstat --date-order --pretty=format:"%%at %%aN" %s' % (getlogrange('HEAD'))]).split('\n')
+		lines = getpipeoutput(['git log --numstat --date-order  --pretty=format:"%%at %%aN" %s' % (getlogrange('HEAD'))]).split('\n')
 		lines.reverse()
 		files = 0; inserted = 0; deleted = 0
 		author = None
 		stamp = 0
 		for line in lines:
-			if len(line) == 0:
+			if len(line.strip()) == 0:
 				continue
+			# binary file
+			if line.startswith('-'):
+				continue
+			matches = file_pattern.search(line)
+			if matches:
+				strinserted, strdeleted, filename = matches.groups()
 
+				try:
+					ext = filename.split(os.extsep)[-1]
+				except IndexError as ex:
+					ext = ''
+
+				# ignore files we don't care about
+				if len(conf['include_extensions']) == 0:
+					if ext.startswith(conf['exclude_extensions']):
+						continue
+				else:
+					if not ext.startswith(conf['include_extensions']):
+						continue
+				inserted += int(strinserted)
+				deleted += int(strdeleted)
+			else:
 			# <stamp> <author>
-			if re.search('files? changed', line) == None:
+			# if re.search('files? changed', line) == None:
 				pos = line.find(' ')
 				if pos != -1:
 					try:
@@ -625,15 +680,6 @@ class GitDataCollector(DataCollector):
 						print 'Warning: unexpected line "%s"' % line
 				else:
 					print 'Warning: unexpected line "%s"' % line
-			else:
-				numbers = getstatsummarycounts(line);
-
-				if len(numbers) == 3:
-					(files, inserted, deleted) = map(lambda el : int(el), numbers)
-				else:
-					print 'Warning: failed to handle line "%s"' % line
-					(files, inserted, deleted) = (0, 0, 0)
-	
 	def refine(self):
 		# authors
 		# name -> {place_by_commits, commits_frac, date_first, date_last, timedelta}
@@ -754,7 +800,7 @@ class HTMLReportCreator(ReportCreator):
 
 		self.printNav(f)
 
-		f.write('<dl>')
+		f.write('<dl class="dl-horizontal">')
 		f.write('<dt>Project name</dt><dd>%s</dd>' % (data.projectname))
 		f.write('<dt>Generated</dt><dd>%s (in %d seconds)</dd>' % (datetime.datetime.now().strftime(format), time.time() - data.getStampCreated()))
 		f.write('<dt>Generator</dt><dd><a href="http://gitstats.sourceforge.net/">GitStats</a> (version %s), %s, %s</dd>' % (getversion(), getgitversion(), getgnuplotversion()))
@@ -795,7 +841,7 @@ class HTMLReportCreator(ReportCreator):
 			stampcur -= deltaweek
 
 		# top row: commits & bar
-		f.write('<table class="noborders"><tr>')
+		f.write('<table class="table tight-table"><tr>')
 		for i in range(0, WEEKS):
 			commits = 0
 			if weeks[i] in data.activity_by_year_week:
@@ -805,7 +851,8 @@ class HTMLReportCreator(ReportCreator):
 			if weeks[i] in data.activity_by_year_week:
 				percentage = float(data.activity_by_year_week[weeks[i]]) / data.activity_by_year_week_peak
 			height = max(1, int(200 * percentage))
-			f.write('<td style="text-align: center; vertical-align: bottom">%d<div style="display: block; background-color: red; width: 20px; height: %dpx"></div></td>' % (commits, height))
+
+			f.write('<td style="text-align: center; vertical-align: bottom">%d<div style="display: block; background-color: hsl(206, 90%%, 50%%); width: 20px; height: %dpx"></div></td>' % (commits, height))
 
 		# bottom row: year/week
 		f.write('</tr><tr>')
@@ -816,15 +863,15 @@ class HTMLReportCreator(ReportCreator):
 		# Hour of Day
 		f.write(html_header(2, 'Hour of Day'))
 		hour_of_day = data.getActivityByHourOfDay()
-		f.write('<table><tr><th>Hour</th>')
+		f.write('<table  class="table tight-table"><tr><th>Hour</th>')
 		for i in range(0, 24):
 			f.write('<th>%d</th>' % i)
 		f.write('</tr>\n<tr><th>Commits</th>')
 		fp = open(path + '/hour_of_day.dat', 'w')
 		for i in range(0, 24):
-			if i in hour_of_day:
-				r = 127 + int((float(hour_of_day[i]) / data.activity_by_hour_of_day_busiest) * 128)
-				f.write('<td style="background-color: rgb(%d, 0, 0)">%d</td>' % (r, hour_of_day[i]))
+			if i in hour_of_day:             
+				r = lightness = 100 - int((float(hour_of_day[i]) / data.activity_by_hour_of_day_busiest) * 50)
+				f.write('<td style="background-color: hsl(206, 90%%, %d%%)">%d</td>' % (r, hour_of_day[i]))
 				fp.write('%d %d\n' % (i, hour_of_day[i]))
 			else:
 				f.write('<td>0</td>')
@@ -834,8 +881,8 @@ class HTMLReportCreator(ReportCreator):
 		totalcommits = data.getTotalCommits()
 		for i in range(0, 24):
 			if i in hour_of_day:
-				r = 127 + int((float(hour_of_day[i]) / data.activity_by_hour_of_day_busiest) * 128)
-				f.write('<td style="background-color: rgb(%d, 0, 0)">%.2f</td>' % (r, (100.0 * hour_of_day[i]) / totalcommits))
+				r = lightness = 100 - int((float(hour_of_day[i]) / data.activity_by_hour_of_day_busiest) * 50)
+				f.write('<td style="background-color: hsl(206, 90%%, %d%%)">%.2f</td>' % (r, (100.0 * hour_of_day[i]) / totalcommits))
 			else:
 				f.write('<td>0.00</td>')
 		f.write('</tr></table>')
@@ -851,7 +898,7 @@ class HTMLReportCreator(ReportCreator):
 		# Day of Week
 		f.write(html_header(2, 'Day of Week'))
 		day_of_week = data.getActivityByDayOfWeek()
-		f.write('<div class="vtable"><table>')
+		f.write('<table class="table vertical-table">')
 		f.write('<tr><th>Day</th><th>Total (%)</th></tr>')
 		fp = open(path + '/day_of_week.dat', 'w')
 		for d in range(0, 7):
@@ -866,13 +913,13 @@ class HTMLReportCreator(ReportCreator):
 			else:
 				f.write('<td>0</td>')
 			f.write('</tr>')
-		f.write('</table></div>')
+		f.write('</table>')
 		f.write('<img src="day_of_week.png" alt="Day of Week">')
 		fp.close()
 
 		# Hour of Week
 		f.write(html_header(2, 'Hour of Week'))
-		f.write('<table>')
+		f.write('<table class="table square-table">')
 
 		f.write('<tr><th>Weekday</th>')
 		for hour in range(0, 24):
@@ -888,8 +935,8 @@ class HTMLReportCreator(ReportCreator):
 					commits = 0
 				if commits != 0:
 					f.write('<td')
-					r = 127 + int((float(commits) / data.activity_by_hour_of_week_busiest) * 128)
-					f.write(' style="background-color: rgb(%d, 0, 0)"' % r)
+					r = 100 - int((float(commits) / data.activity_by_hour_of_week_busiest) * 50)
+					f.write(' style="background-color: hsl(206, 90%%, %d%%"' % r)
 					f.write('>%d</td>' % commits)
 				else:
 					f.write('<td></td>')
@@ -899,7 +946,7 @@ class HTMLReportCreator(ReportCreator):
 
 		# Month of Year
 		f.write(html_header(2, 'Month of Year'))
-		f.write('<div class="vtable"><table>')
+		f.write('<table class="table vertical-table">')
 		f.write('<tr><th>Month</th><th>Commits (%)</th></tr>')
 		fp = open (path + '/month_of_year.dat', 'w')
 		for mm in range(1, 13):
@@ -909,15 +956,15 @@ class HTMLReportCreator(ReportCreator):
 			f.write('<tr><td>%d</td><td>%d (%.2f %%)</td></tr>' % (mm, commits, (100.0 * commits) / data.getTotalCommits()))
 			fp.write('%d %d\n' % (mm, commits))
 		fp.close()
-		f.write('</table></div>')
+		f.write('</table>')
 		f.write('<img src="month_of_year.png" alt="Month of Year">')
 
 		# Commits by year/month
 		f.write(html_header(2, 'Commits by year/month'))
-		f.write('<div class="vtable"><table><tr><th>Month</th><th>Commits</th><th>Lines added</th><th>Lines removed</th></tr>')
+		f.write('<table class="table vertical-table"><tr><th>Month</th><th>Commits</th><th>Lines added</th><th>Lines removed</th></tr>')
 		for yymm in reversed(sorted(data.commits_by_month.keys())):
 			f.write('<tr><td>%s</td><td>%d</td><td>%d</td><td>%d</td></tr>' % (yymm, data.commits_by_month.get(yymm,0), data.lines_added_by_month.get(yymm,0), data.lines_removed_by_month.get(yymm,0)))
-		f.write('</table></div>')
+		f.write('</table>')
 		f.write('<img src="commits_by_year_month.png" alt="Commits by year/month">')
 		fg = open(path + '/commits_by_year_month.dat', 'w')
 		for yymm in sorted(data.commits_by_month.keys()):
@@ -926,10 +973,10 @@ class HTMLReportCreator(ReportCreator):
 
 		# Commits by year
 		f.write(html_header(2, 'Commits by Year'))
-		f.write('<div class="vtable"><table><tr><th>Year</th><th>Commits (% of all)</th><th>Lines added</th><th>Lines removed</th></tr>')
+		f.write('<table class="table vertical-table"><tr><th>Year</th><th>Commits (% of all)</th><th>Lines added</th><th>Lines removed</th></tr>')
 		for yy in reversed(sorted(data.commits_by_year.keys())):
 			f.write('<tr><td>%s</td><td>%d (%.2f%%)</td><td>%d</td><td>%d</td></tr>' % (yy, data.commits_by_year.get(yy,0), (100.0 * data.commits_by_year.get(yy,0)) / data.getTotalCommits(), data.lines_added_by_year.get(yy,0), data.lines_removed_by_year.get(yy,0)))
-		f.write('</table></div>')
+		f.write('</table>')
 		f.write('<img src="commits_by_year.png" alt="Commits by Year">')
 		fg = open(path + '/commits_by_year.dat', 'w')
 		for yy in sorted(data.commits_by_year.keys()):
@@ -938,14 +985,14 @@ class HTMLReportCreator(ReportCreator):
 
 		# Commits by timezone
 		f.write(html_header(2, 'Commits by Timezone'))
-		f.write('<table><tr>')
+		f.write('<table class="table"><tr>')
 		f.write('<th>Timezone</th><th>Commits</th>')
 		f.write('</tr>')
 		max_commits_on_tz = max(data.commits_by_timezone.values())
 		for i in sorted(data.commits_by_timezone.keys(), key = lambda n : int(n)):
 			commits = data.commits_by_timezone[i]
-			r = 127 + int((float(commits) / max_commits_on_tz) * 128)
-			f.write('<tr><th>%s</th><td style="background-color: rgb(%d, 0, 0)">%d</td></tr>' % (i, r, commits))
+			r = 100 - int((float(commits) / max_commits_on_tz) * 50)
+			f.write('<tr><th>%s</th><td style="background-color: hsl(206, 90%%, %d%%)">%d</td></tr>' % (i, r, commits))
 		f.write('</table>')
 
 		f.write('</body></html>')
@@ -962,11 +1009,11 @@ class HTMLReportCreator(ReportCreator):
 		# Authors :: List of authors
 		f.write(html_header(2, 'List of Authors'))
 
-		f.write('<table class="authors sortable" id="authors">')
-		f.write('<tr><th>Author</th><th>Commits (%)</th><th>+ lines</th><th>- lines</th><th>First commit</th><th>Last commit</th><th class="unsortable">Age</th><th>Active days</th><th># by commits</th></tr>')
+		f.write('<table class="authors sortable table" id="authors">')
+		f.write('<tr><th>Author</th><th>Commits (%)</th><th>+ lines</th><th>- lines</th><th>First commit</th><th>Last commit</th><th class="unsortable">Age</th><th>Active days</th><th> + lines / commits</th><th># by commits</th></tr>')
 		for author in data.getAuthors(conf['max_authors']):
 			info = data.getAuthorInfo(author)
-			f.write('<tr><td>%s</td><td>%d (%.2f%%)</td><td>%d</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%d</td><td>%d</td></tr>' % (author, info['commits'], info['commits_frac'], info['lines_added'], info['lines_removed'], info['date_first'], info['date_last'], info['timedelta'], len(info['active_days']), info['place_by_commits']))
+			f.write('<tr><td>%s</td><td>%d (%.2f%%)</td><td>%d</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%d</td><td>%.2f</td><td>%d</td></tr>' % (author, info['commits'], info['commits_frac'], info['lines_added'], info['lines_removed'], info['date_first'], info['date_last'], info['timedelta'], len(info['active_days']), float(info['lines_added']) / info['commits'], info['place_by_commits']))
 		f.write('</table>')
 
 		allauthors = data.getAuthors()
@@ -1018,7 +1065,7 @@ class HTMLReportCreator(ReportCreator):
 
 		# Authors :: Author of Month
 		f.write(html_header(2, 'Author of Month'))
-		f.write('<table class="sortable" id="aom">')
+		f.write('<table class="sortable table" id="aom">')
 		f.write('<tr><th>Month</th><th>Author</th><th>Commits (%%)</th><th class="unsortable">Next top %d</th><th>Number of authors</th></tr>' % conf['authors_top'])
 		for yymm in reversed(sorted(data.author_of_month.keys())):
 			authordict = data.author_of_month[yymm]
@@ -1031,7 +1078,7 @@ class HTMLReportCreator(ReportCreator):
 		f.write('</table>')
 
 		f.write(html_header(2, 'Author of Year'))
-		f.write('<table class="sortable" id="aoy"><tr><th>Year</th><th>Author</th><th>Commits (%%)</th><th class="unsortable">Next top %d</th><th>Number of authors</th></tr>' % conf['authors_top'])
+		f.write('<table class="sortable table" id="aoy"><tr><th>Year</th><th>Author</th><th>Commits (%%)</th><th class="unsortable">Next top %d</th><th>Number of authors</th></tr>' % conf['authors_top'])
 		for yy in reversed(sorted(data.author_of_year.keys())):
 			authordict = data.author_of_year[yy]
 			authors = getkeyssortedbyvalues(authordict)
@@ -1045,7 +1092,7 @@ class HTMLReportCreator(ReportCreator):
 		f.write(html_header(2, 'Commits by Domains'))
 		domains_by_commits = getkeyssortedbyvaluekey(data.domains, 'commits')
 		domains_by_commits.reverse() # most first
-		f.write('<div class="vtable"><table>')
+		f.write('<table class="table vertical-table">')
 		f.write('<tr><th>Domains</th><th>Total (%)</th></tr>')
 		fp = open(path + '/domains.dat', 'w')
 		n = 0
@@ -1057,7 +1104,7 @@ class HTMLReportCreator(ReportCreator):
 			info = data.getDomainInfo(domain)
 			fp.write('%s %d %d\n' % (domain, n , info['commits']))
 			f.write('<tr><th>%s</th><td>%d (%.2f%%)</td></tr>' % (domain, info['commits'], (100.0 * info['commits'] / totalcommits)))
-		f.write('</table></div>')
+		f.write('</table>')
 		f.write('<img src="domains.png" alt="Commits by Domains">')
 		fp.close()
 
@@ -1101,7 +1148,7 @@ class HTMLReportCreator(ReportCreator):
 
 		# Files :: Extensions
 		f.write(html_header(2, 'Extensions'))
-		f.write('<table class="sortable" id="ext"><tr><th>Extension</th><th>Files (%)</th><th>Lines (%)</th><th>Lines/file</th></tr>')
+		f.write('<table class="sortable table" id="ext"><tr><th>Extension</th><th>Files (%)</th><th>Lines (%)</th><th>Lines/file</th></tr>')
 		for ext in sorted(data.extensions.keys()):
 			files = data.extensions[ext]['files']
 			lines = data.extensions[ext]['lines']
@@ -1381,15 +1428,23 @@ plot """
 	<title>GitStats - %s</title>
 	<link rel="stylesheet" href="%s" type="text/css">
 	<meta name="generator" content="GitStats %s">
+	<link rel="stylesheet" href=
+    "https://maxcdn.bootstrapcdn.com/bootstrap/3.3.2/css/bootstrap.min.css">
+    <link rel="stylesheet" href="{}" type="text/css" />
 	<script type="text/javascript" src="sortable.js"></script>
 </head>
 <body>
+<div class="container">
+<div class="row">
+<div class="col-sm-11 col-sm-offset-1">
 """ % (self.title, conf['style'], getversion()))
 
 	def printNav(self, f):
 		f.write("""
-<div class="nav">
-<ul>
+<nav class="navbar navbar-default navbar-fixed-top">		
+<div class="container">
+<div class="navbar-header"></div>
+<ul class="nav navbar-nav">
 <li><a href="index.html">General</a></li>
 <li><a href="activity.html">Activity</a></li>
 <li><a href="authors.html">Authors</a></li>
@@ -1398,6 +1453,7 @@ plot """
 <li><a href="tags.html">Tags</a></li>
 </ul>
 </div>
+</nav>
 """)
 		
 def usage():
@@ -1424,6 +1480,8 @@ class GitStats:
 					raise KeyError('no such key "%s" in config' % key)
 				if isinstance(conf[key], int):
 					conf[key] = int(value)
+				elif key == 'include_extensions' or key == 'exclude_extensions':
+					conf[key] = tuple(value.split(','))
 				else:
 					conf[key] = value
 			elif o in ('-h', '--help'):
@@ -1433,7 +1491,7 @@ class GitStats:
 		if len(args) < 2:
 			usage()
 			sys.exit(0)
-
+		print conf
 		outputpath = os.path.abspath(args[-1])
 		rundir = os.getcwd()
 
